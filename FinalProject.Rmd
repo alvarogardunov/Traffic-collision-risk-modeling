@@ -1,0 +1,233 @@
+---
+title: 'Math 449 Final Project'
+author: "Alvaro Garduno"
+date: "5/16/2026"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=TRUE}
+library(tidyverse)
+library(caret)
+library(pROC)
+library(boot)
+library(vcd)
+```
+
+#### Section 1
+
+```{r}
+traffic <- read.csv("C:\\Users\\gardu\\OneDrive - San Francisco State University\\MATH449\\Data\\Traffic_Crashes_-_Crashes.csv")
+nrow(traffic)
+traffic <- na.omit(traffic)
+nrow(traffic)
+# 1 if there's any injury, 0 otherwise
+traffic$INJURY_ANY <- as.factor(ifelse(traffic$INJURIES_TOTAL > 0, 1, 0))
+
+# key predictors
+df_clean <- traffic %>%
+  select(
+    INJURY_ANY,
+    POSTED_SPEED_LIMIT,
+    WEATHER_CONDITION,
+    LIGHTING_CONDITION,
+    ROADWAY_SURFACE_COND,
+    CRASH_HOUR,
+    CRASH_DAY_OF_WEEK,
+    LANE_CNT  
+  )
+
+df_clean <- df_clean %>%
+  mutate(across(where(is.character), as.factor))
+
+# sample to capture try and capture all factor levels
+set.seed(17)
+sample_idx <- createDataPartition(df_clean$INJURY_ANY, p = 50000 / nrow(df_clean), list = FALSE)
+df_sample <- df_clean[sample_idx, ]
+
+# Plots
+ggplot(df_clean, aes(x = POSTED_SPEED_LIMIT, fill = INJURY_ANY)) +
+  geom_histogram(binwidth = 5, position = "stack", color = "white") +
+  scale_fill_manual(values = c("0" = "salmon", "1" = "turquoise3"), 
+                    labels = c("Property Damage Only", "Injury Occurred")) +
+  labs(title = "Distribution of Posted Speed Limits by Crash Outcome",
+       x = "Posted Speed Limit (MPH)", y = "Count of Crashes", fill = "Outcome") +
+  theme_minimal()
+
+ggplot(df_clean, aes(x = LIGHTING_CONDITION, fill = INJURY_ANY)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = c("0" = "salmon", "1" = "turquoise3"), 
+                    labels = c("Property Damage Only", "Injury Occurred")) +
+  labs(title = "Proportional Injury Rates Across Lighting Conditions",
+       x = "Lighting Condition", y = "Proportion of Crashes", fill = "Outcome") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Reshape data slightly just for quick plotting of frequencies
+df_clean %>%
+  select(WEATHER_CONDITION, ROADWAY_SURFACE_COND) %>%
+  gather(key = "Environmental_Predictor", value = "Condition Value") %>%
+  ggplot(aes(x = `Condition Value`)) +
+  geom_bar(fill = "salmon", color = "white") +
+  facet_wrap(~Environmental_Predictor, scales = "free_x", nrow = 2) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Frequencies of Atmospheric and Road Surface Conditions",
+       x = "Condition Category", y = "Crash Counts")
+```
+
+Vehicle collisions are a very common occurring issue, especially in large and busy cities such as Chicago. While every traffic accident is different, the severity of the collisions varies. Some collisions result in minor property damage only while others result in severe bodily injuries or even fatalities. In order to have safer streets and improve emergency response deployment, it is important to identify the specific environmental, weather, and structural factors that contribute to injury severity during a collision. In this project, the factors influencing whether a collision results in physical injury will be analyzed through logistic regression, utilizing binary injury occurrence as the target variable.
+
+#### Section 2
+
+```{r}
+full_model <- glm(INJURY_ANY ~ POSTED_SPEED_LIMIT + WEATHER_CONDITION + 
+                  LIGHTING_CONDITION + ROADWAY_SURFACE_COND + 
+                  CRASH_HOUR + CRASH_DAY_OF_WEEK + LANE_CNT, 
+                  data = df_sample, family = binomial(link = "logit"))
+summary(full_model)
+```
+
+#### Section 3
+
+```{r}
+best_model <- step(full_model, direction = "both", trace = FALSE)
+summary(best_model)
+
+par(mfrow = c(2, 2))
+plot(best_model) 
+par(mfrow = c(1, 1))
+
+# Goodness of Fit
+gof_p_value <- 1 - pchisq(best_model$deviance, best_model$df.residual)
+gof_p_value
+
+# Odds Ratios and CI's
+odds_ratios <- exp(coef(best_model))
+ci_mult_effects <- exp(confint(best_model))
+
+print(cbind(Odds_Ratio = odds_ratios, ci_mult_effects))
+
+```
+
+#### Section 4
+
+```{r}
+set.seed(994)
+test_data <- df_clean[-sample_idx, ] %>% sample_n(1000)
+
+# predicted probabilities
+test_data$pred_prob <- predict(best_model, newdata = test_data, type = "response")
+
+# first few predictions
+head(test_data[, c("INJURY_ANY", "pred_prob")])
+
+```
+
+#### Section 5
+
+```{r}
+cutoffs <- c(0.10, 0.20, 0.50)
+
+for(pi_0 in cutoffs) {
+  pi_0
+  
+  pred_class <- as.factor(ifelse(test_data$pred_prob > pi_0, 1, 0))
+  levels(pred_class) <- c("0", "1") 
+  
+  cm <- confusionMatrix(pred_class, test_data$INJURY_ANY, positive = "1")
+  print(cm$table)
+  cat("Accuracy:", cm$overall["Accuracy"], " | Sensitivity:", cm$byClass["Sensitivity"], " | Specificity:", cm$byClass["Specificity"], "\n")
+}
+
+```
+
+#### Section 6
+
+```{r}
+# probability of injury across speed limits
+ggplot(df_sample, aes(x = POSTED_SPEED_LIMIT, y = as.numeric(INJURY_ANY)-1)) +
+  geom_jitter(height = 0.05, alpha = 0.2, color = "darkgray") +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), color = "blue", se = TRUE) +
+  labs(title = "Logistic Regression Curve: Probability of Injury vs Speed Limit",
+       x = "Posted Speed Limit (MPH)", y = "Probability of Injury (1 = Yes)") +
+  theme_minimal()
+
+# proportion of injuries across weather conditions
+ggplot(df_sample, aes(x = WEATHER_CONDITION, fill = INJURY_ANY)) +
+  geom_bar(position = "fill") +
+  labs(title = "Proportion of Crash Severity by Weather Condition",
+       x = "Weather Condition", y = "Proportion", fill = "Injury Occurred") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+#### Section 7
+
+```{r}
+roc_obj <- roc(test_data$INJURY_ANY, test_data$pred_prob)
+
+# ROC Curve
+plot(roc_obj, col = "salmon", main = paste("ROC Curve (AUC =", round(auc(roc_obj), 4), ")"), lwd = 2)
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# best cutoff point
+best_coords <- coords(roc_obj, "best", ret = c("threshold", "specificity", "sensitivity"))
+print(best_coords)
+```
+
+#### Section 8
+
+```{r}
+cost_fn <- function(r, pi = 0) mean(abs(r - pi) > 0.5)
+
+# k-Fold Cross-Validation (k = 10)
+set.seed(123)
+cv_10fold <- cv.glm(df_sample, best_model, cost = cost_fn, K = 10)
+cat("10-Fold CV Misclassification Error Rate:", cv_10fold$delta[1], "\n")
+
+# LOOCV
+df_loocv <- df_sample %>% sample_n(500)
+loocv_model <- glm(formula(best_model), data = df_loocv, family = binomial(link = "logit"))
+cv_loocv <- cv.glm(df_loocv, loocv_model, cost = cost_fn)
+cat("LOOCV Misclassification Error Rate:", cv_loocv$delta[1], "\n")
+
+```
+
+#### Section 9
+
+```{r}
+# Probit Link Model
+probit_model <- glm(formula(best_model), data = df_sample, family = binomial(link = "probit"))
+summary(probit_model)
+
+# Identity Link Model
+model_coefficients_count <- length(coef(best_model))
+start_vals <- c(mean(as.numeric(df_sample$INJURY_ANY) - 1), rep(0, model_coefficients_count - 1))
+
+identity_model <- glm(formula(best_model), data = df_sample, 
+                      family = binomial(link = "identity"), 
+                      start = start_vals, 
+                      control = glm.control(maxit = 100))
+summary(identity_model)
+
+# compare using AIC
+cat("Logit Link AIC   :", AIC(best_model), "\n")
+cat("Probit Link AIC  :", AIC(probit_model), "\n")
+cat("Identity Link AIC:", AIC(identity_model), "\n")
+
+```
+
+#### Section 10
+
+The Probit link model achieved the lowest overall AIC score at 37060.02. However, because the difference between the Probit and Logit models is only 0.14 points, they're almost identical in predictive performance. We also have to take into consideration that Logit coefficients can give us Odds Ratios which help us with interpretations in our context.
+
+#### Section 11
+
+I am not using grouped data
+
+#### Section 12
+
+Report in a separate file.
